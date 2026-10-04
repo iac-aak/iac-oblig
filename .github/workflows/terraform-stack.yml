@@ -60,7 +60,9 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Hvem er jeg?
-        run: az account show --output table
+        run: |
+          az account show --output table
+          az account show --query user --output json
 
       # Parameterverdiene ligger i Key Vault, ikke i repoet (K7).
       - name: Hent parameterfila fra Key Vault
