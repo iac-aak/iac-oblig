@@ -1,0 +1,120 @@
+# Gjenbrukbar jobb: init, plan og apply (eller destroy) for ÉN stack i ETT miljø.
+# Kalles av deploy.yml og destroy.yml, som bestemmer rekkefølgen mellom stackene.
+name: Terraform – én stack
+
+on:
+  workflow_call:
+    inputs:
+      stack:
+        description: Mappa under oblig1/stacks/ (nettverk eller app)
+        type: string
+        required: true
+      environment:
+        description: Miljø – styrer GitHub environment, state-key og parameterfil
+        type: string
+        required: true
+      destroy:
+        description: Lag en destroy-plan i stedet for en vanlig plan
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    # Gir OIDC-subject repo:<org>/<repo>:environment:<miljø> (K10).
+    environment: ${{ inputs.environment }}
+
+    defaults:
+      run:
+        working-directory: oblig1/stacks/${{ inputs.stack }}
+
+    env:
+      STACK: ${{ inputs.stack }}
+      MILJO: ${{ inputs.environment }}
+      ARM_USE_OIDC: true
+      ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      TF_INPUT: false
+      TF_IN_AUTOMATION: true
+
+    steps:
+      - name: Hent koden
+        uses: actions/checkout@v5
+
+      - name: Installer Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      # OIDC: ingen client secret, bare ID-er (K11).
+      - name: Logg inn i Azure
+        uses: Azure/login@v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Hvem er jeg?
+        run: az account show --output table
+
+      # Parameterverdiene ligger i Key Vault, ikke i repoet (K7).
+      - name: Hent parameterfila fra Key Vault
+        run: |
+          az keyvault secret show \
+            --vault-name "${{ secrets.KEYVAULT_NAME }}" \
+            --name "tfvars-$STACK-$MILJO" \
+            --query value -o tsv > params.auto.tfvars
+
+      # shared/backend.hcl er eneste sted storage account-navnet står (K5).
+      # Verdiene sendes også inn som TF_VAR_backend_*, så app-stacken kan lese
+      # nettverkets state. Stacker som ikke deklarerer dem, ignorerer dem.
+      - name: Les backend-adressen
+        run: |
+          sed -nE 's/^[[:space:]]*([a-z_]+)[[:space:]]*=[[:space:]]*"([^"]*)".*/TF_VAR_backend_\1=\2/p' \
+            "$GITHUB_WORKSPACE/oblig1/shared/backend.hcl" >> "$GITHUB_ENV"
+
+      # Egen key per miljø og stack i samme container (K6).
+      - name: Init
+        run: |
+          terraform init \
+            -backend-config="$GITHUB_WORKSPACE/oblig1/shared/backend.hcl" \
+            -backend-config="key=$MILJO/$STACK.tfstate"
+
+      - name: Validate
+        run: terraform validate
+
+      # -detailed-exitcode: 0 = ingen endringer, 1 = feil, 2 = endringer.
+      - name: Plan
+        id: plan
+        env:
+          DESTROY_FLAGG: ${{ inputs.destroy && '-destroy' || '' }}
+        run: |
+          set +e
+          terraform plan $DESTROY_FLAGG -out=tfplan -detailed-exitcode
+          kode=$?
+          set -e
+          if [ "$kode" -eq 1 ]; then
+            exit 1
+          fi
+          if [ "$kode" -eq 2 ]; then
+            echo "endringer=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "endringer=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Apply
+        if: steps.plan.outputs.endringer == 'true'
+        run: terraform apply tfplan
+
+      - name: Ingen endringer å utføre
+        if: steps.plan.outputs.endringer == 'false'
+        run: echo "Planen viste No changes – apply hoppes over."
+
+      - name: Slett parameterfila og planen
+        if: always()
+        run: rm -f params.auto.tfvars tfplan

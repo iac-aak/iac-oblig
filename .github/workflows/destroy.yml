@@ -1,0 +1,56 @@
+name: Riv ned et miljø
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Miljø som skal rives ned
+        type: choice
+        options: [dev, test]
+        required: true
+      bekreftelse:
+        description: 'Skriv "riv ned <miljø>" for å bekrefte'
+        type: string
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: terraform-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  bekreft:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sjekk bekreftelsen
+        env:
+          BEKREFTELSE: ${{ inputs.bekreftelse }}
+          MILJO: ${{ inputs.environment }}
+        run: |
+          if [ "$BEKREFTELSE" != "riv ned $MILJO" ]; then
+            echo "::error::Ikke bekreftet. Forventet nøyaktig: riv ned $MILJO"
+            exit 1
+          fi
+          echo "Bekreftet: river ned $MILJO"
+
+  # Motsatt rekkefølge av utrulling: app først, mens nettverkets state fortsatt finnes.
+  app:
+    needs: bekreft
+    uses: ./.github/workflows/terraform-stack.yml
+    with:
+      stack: app
+      environment: ${{ inputs.environment }}
+      destroy: true
+    secrets: inherit
+
+  nettverk:
+    needs: app
+    uses: ./.github/workflows/terraform-stack.yml
+    with:
+      stack: nettverk
+      environment: ${{ inputs.environment }}
+      destroy: true
+    secrets: inherit

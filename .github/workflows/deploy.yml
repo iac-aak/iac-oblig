@@ -1,0 +1,46 @@
+name: Rull ut
+
+on:
+  # Push til main ruller bare ut dev (K11). Andre miljøer krever manuell kjøring.
+  push:
+    branches: [main]
+    paths:
+      - 'oblig1/stacks/**'
+      - 'oblig1/modules/**'
+      - 'oblig1/shared/**'
+      - '.github/workflows/deploy.yml'
+      - '.github/workflows/terraform-stack.yml'
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Miljø – gjelder bare ved manuell kjøring
+        type: choice
+        options: [dev, test]
+        default: dev
+
+permissions:
+  id-token: write
+  contents: read
+
+# Deploy og destroy for samme miljø skal aldri kjøre samtidig.
+concurrency:
+  group: terraform-${{ inputs.environment || 'dev' }}
+  cancel-in-progress: false
+
+jobs:
+  nettverk:
+    uses: ./.github/workflows/terraform-stack.yml
+    with:
+      stack: nettverk
+      environment: ${{ inputs.environment || 'dev' }}
+    secrets: inherit
+
+  # app leser nettverkets state (K9), så nettverk må være ferdig først.
+  app:
+    needs: nettverk
+    uses: ./.github/workflows/terraform-stack.yml
+    with:
+      stack: app
+      environment: ${{ inputs.environment || 'dev' }}
+    secrets: inherit
